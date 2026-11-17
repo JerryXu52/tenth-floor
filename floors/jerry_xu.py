@@ -8,7 +8,7 @@ Controls, on top of the engine's (arrows / WASD to move, SPACE to jump, UP to se
     Mouse        aim the portal device
     Left click   blue portal      (or E)
     Right click  orange portal    (or Q)
-    F or DOWN    grab / drop a cube, press a switch
+    DOWN or S    grab / drop a cube, press a switch   (F is the game's flashlight)
 
 Levels, west to east:   1 Orientation (the tutorial)  ->  2 Installation Lab  ->  3 Fabrication Bay
                         ->  4 XR Tracking Floor  ->  5 XR Holo Stage (the code digit)
@@ -21,6 +21,9 @@ behind are already open, so each level can be crossed from either side. The digi
 (cube on the button turns off the laser grid) has to be solved from whichever side you come in.
 """
 import math
+import random
+import threading
+from array import array
 
 import pygame
 
@@ -57,13 +60,114 @@ def _font(size):
     return _FONTS[size]
 
 
+# --- sound: the floor's own effects, made from waves in code (no files), like engine/sound.py ---------------
+# They only play once the game has the mixer running (the engine starts it); in the check there's no sound,
+# and every call quietly does nothing.
+
+_RATE = 22050
+_SFX = {}
+_SFX_STATE = {"started": False}
+
+
+def _wave(secs, fn, vol):
+    n = int(_RATE * secs)
+    return [vol * fn(i / _RATE, i / max(1, n - 1)) for i in range(n)]
+
+
+def _glide(f0, f1, secs, vol=0.2, shape="sine", wobble=0.0):
+    ph = [0.0]
+
+    def fn(t, u):
+        f = f0 + (f1 - f0) * u
+        if wobble:
+            f *= 1 + wobble * math.sin(2 * math.pi * 9 * t)
+        ph[0] = (ph[0] + f / _RATE) % 1.0
+        x = ph[0]
+        v = math.sin(2 * math.pi * x) if shape == "sine" else (1.0 if x < 0.5 else -1.0) if shape == "square" \
+            else 4 * abs(x - 0.5) - 1
+        return v * min(1.0, t / 0.004) * (1 - u) ** 1.5
+    return _wave(secs, fn, vol)
+
+
+def _hiss(secs, vol=0.15, falling=True):
+    rng = random.Random(7)
+    last = [0.0]
+
+    def fn(t, u):
+        last[0] = 0.6 * last[0] + 0.4 * rng.uniform(-1, 1)          # a soft, filtered noise
+        return last[0] * ((1 - u) if falling else math.sin(math.pi * u))
+    return _wave(secs, fn, vol)
+
+
+def _mixw(*waves):
+    n = max(len(w) for w in waves)
+    return [sum(w[i] for w in waves if i < len(w)) for i in range(n)]
+
+
+def _then(*waves):
+    out = []
+    for w in waves:
+        out += w
+    return out
+
+
+def _sfx_waves():
+    return {
+        "blue": _mixw(_glide(420, 980, 0.22, 0.16), _hiss(0.22, 0.05, falling=False)),
+        "orange": _mixw(_glide(330, 760, 0.22, 0.16), _hiss(0.22, 0.05, falling=False)),
+        "fizzle": _mixw(_glide(180, 120, 0.18, 0.12, "square"), _hiss(0.18, 0.08)),
+        "warp": _mixw(_glide(200, 1400, 0.28, 0.12, "tri"), _hiss(0.32, 0.12, falling=False)),
+        "coin": _then(_glide(988, 988, 0.06, 0.10, "square"), _glide(1319, 1319, 0.16, 0.10, "square")),
+        "bump": _mixw(_glide(160, 90, 0.12, 0.25), _hiss(0.08, 0.10)),
+        "power": _then(*[_glide(f, f, 0.07, 0.11, "tri") for f in (523, 659, 784, 1047)], _glide(1319, 1319, 0.25, 0.11, "tri")),
+        "stomp": _mixw(_glide(300, 70, 0.16, 0.25), _hiss(0.1, 0.12)),
+        "spring": _glide(220, 880, 0.3, 0.16, "sine", wobble=0.08),
+        "button": _then(_hiss(0.02, 0.15), _glide(600, 900, 0.12, 0.12, "tri")),
+        "door": _mixw(_glide(110, 150, 0.4, 0.10, "tri"), _hiss(0.4, 0.06, falling=False)),
+        "bridge": _mixw(_glide(660, 990, 0.35, 0.08), _glide(990, 1320, 0.35, 0.05)),
+        "grab": _then(_hiss(0.015, 0.12), _glide(500, 700, 0.06, 0.10, "tri")),
+        "drop": _then(_hiss(0.015, 0.12), _glide(500, 330, 0.08, 0.10, "tri")),
+        "step": _then(_glide(784, 784, 0.08, 0.07, "tri"), _glide(1175, 1175, 0.22, 0.07, "tri")),
+        "device": _then(*[_glide(f, f * 1.5, 0.09, 0.10, "tri") for f in (392, 523, 659)], _glide(1047, 1568, 0.3, 0.1)),
+    }
+
+
+def _make_sfx():
+    try:
+        freq, _size, channels = pygame.mixer.get_init()
+        for name, w in _sfx_waves().items():
+            if freq != _RATE:
+                step = _RATE / freq
+                w = [w[int(i * step)] for i in range(int(len(w) / step))]
+            pcm = array("h", (int(max(-1.0, min(1.0, v)) * 32767) for v in w for _ in range(channels)))
+            _SFX[name] = pygame.mixer.Sound(buffer=pcm.tobytes())
+    except Exception:          # no sound on this machine: stay quiet
+        pass
+
+
+def sfx(name):
+    """Play one of the floor's effects. Does nothing until the game's mixer is up and the sounds are made."""
+    try:
+        if not pygame.mixer.get_init():
+            return
+    except Exception:
+        return
+    if not _SFX_STATE["started"]:
+        _SFX_STATE["started"] = True
+        threading.Thread(target=_make_sfx, daemon=True).start()
+        return
+    snd = _SFX.get(name)
+    if snd is not None:
+        snd.play()
+
+
 # --- input the engine doesn't hand to rooms: the mouse and a few extra keys ---------------------------
 
 _FAKE = None    # tests set this to {"pressed": {...}, "aim": (x, y)} to drive the floor without a keyboard
 
 
 class _Input:
-    KEYS = {"blue": ("K_e",), "orange": ("K_q",), "use": ("K_f", "K_DOWN", "K_s")}
+    KEYS = {"blue": ("K_e",), "orange": ("K_q",), "use": ("K_DOWN", "K_s")}
 
     def __init__(self):
         self.was = set()
@@ -460,7 +564,7 @@ class Button:
 
 
 class Switch:
-    """A pedestal switch: press F next to it and its signal stays on for `seconds`, ticking down."""
+    """A pedestal switch: press DOWN next to it and its signal stays on for `seconds`, ticking down."""
 
     def __init__(self, x, link, seconds):
         self.x, self.link, self.seconds = x, link, seconds
@@ -564,6 +668,7 @@ class StompBot:
                 player.on = None
                 room.launched = True
             room.add_coins(1, "Bot stomped")
+            room.effect("stomp", self.box.centerx, self.box.top, (150, 156, 170), 14)
             return
         above = r.bottom <= self.box.top + 6 and _overlap_x(r, self.box) > -20
         self.was_above = above
@@ -604,6 +709,8 @@ class Turret:
         self.beam = None
         self.was_above = False
         self.down = 0.0             # > 0 once knocked over
+        self.mode = None            # "fire" while the beam is out: the engine plays its zap and lights it up
+        self.alert = False          # charging at you: the engine sounds its alarm
 
     def _sight_end(self, room):
         """Where its eye line starts and stops: at its range, or at the first wall or cube in the way."""
@@ -629,11 +736,15 @@ class Turret:
                 player.vy, player.on = -400.0, None
                 room.launched = True
             room.add_coins(2, "Turret knocked over")
+            room.effect("stomp", self.box.centerx, self.box.top, (230, 232, 238), 18)
+            self.mode, self.alert = None, False
             return
         self.was_above = r.bottom <= self.box.top + 6
         x0, end, line = self._sight_end(room)
         sees = line.colliderect(r)
         self.t += dt
+        self.mode = "fire" if self.state == "fire" else None
+        self.alert = self.state in ("charge", "fire")
         if self.state == "idle":
             self.rect = NO_RECT
             if sees:
@@ -842,7 +953,8 @@ def _controls_card():
              ("LEFT click  or  E", "BLUE portal", BLUE),
              ("RIGHT click  or  Q", "ORANGE portal", ORANGE),
              ("WHITE panels", "the only surfaces portals stick to", (150, 230, 255)),
-             ("Walk or fall in", "you come out of the other one, just as fast", (230, 232, 238))]
+             ("Walk or fall in", "you come out of the other one, just as fast", (230, 232, 238)),
+             ("DOWN  or  S", "grab or drop a cube, press a switch", (230, 232, 238))]
     w, h = 560, 58 + 34 * len(lines) + 20
     card = pygame.Surface((w, h), pygame.SRCALPHA)
     pygame.draw.rect(card, (20, 24, 34, 240), card.get_rect(), border_radius=10)
@@ -867,6 +979,7 @@ class Level(Room):
 
     number = 0
     name = "LEVEL"
+    dark = 0.15                   # the lab keeps its lights on after hours (the engine's default is 0.6)
     accent = (255, 150, 40)
     stripe_x = 120
     vents = ((60, 330),)
@@ -898,6 +1011,12 @@ class Level(Room):
         self.burst = None            # (x, y, color, seconds left) when you come out of a portal
         self.card_t = 0.0
         self.steps, self.step_i, self.step_img, self.step_flash = [], -1, None, 0.0
+        self.parts = []              # particles: [x, y, vx, vy, life, max_life, color, size]
+        self.flash = None            # (color, seconds left): a quick full-screen tint for big moments
+        self.was_down = {}
+        self.was_open = {}
+        self.was_bridge = False
+        self.was_flying = False
         self.layout()
         for w in self.walls:
             self.panels += w.panels
@@ -940,6 +1059,20 @@ class Level(Room):
     def say(self, text, seconds=1.6):
         self.msg, self.msg_t = text, seconds
 
+    def effect(self, sound, x, y, color, n=10, speed=160, flash=None):
+        """A sound and a burst of particles at (x, y); flash tints the whole screen for a moment."""
+        if sound:
+            sfx(sound)
+        for _ in range(n):
+            a = random.uniform(0, 2 * math.pi)
+            v = random.uniform(0.3, 1.0) * speed
+            life = random.uniform(0.3, 0.6)
+            self.parts.append([x, y, math.cos(a) * v, math.sin(a) * v - speed * 0.4, life, life, color,
+                               random.choice((2, 3, 3, 4))])
+        del self.parts[:-220]
+        if flash:
+            self.flash = (flash, 0.18)
+
     def add_coins(self, n, why=None):
         RUN["coins"] += n
         if RUN["coins"] >= RUN["helmet_at"]:
@@ -950,6 +1083,9 @@ class Level(Room):
                 return
         if why:
             self.say(f"{why}  +{n}", 1.0)
+        p = self.player
+        if p is not None:
+            self.effect("coin", p.rect.centerx, p.rect.top, C.PIECE, 6, 120)
 
     # guide helpers
     def portal_on(self, panel):
@@ -995,6 +1131,7 @@ class Level(Room):
                 p.on, p.y = None, p.y - 1
                 s.squash = 1.0
                 self.launched = True
+                self.effect("spring", p.rect.centerx, p.rect.bottom, (230, 80, 80), 8, 120)
 
         # momentum from a portal keeps carrying you until you land
         if p.on is not None:
@@ -1013,6 +1150,9 @@ class Level(Room):
             if f.rect.colliderect(p.rect):
                 if self.portals["blue"] or self.portals["orange"]:
                     self.say("The field closed your portals", 1.2)
+                    for pt in self.portals.values():
+                        if pt:
+                            self.effect("fizzle", pt.box.centerx, pt.box.centery, pt.color, 12)
                 self.portals = {"blue": None, "orange": None}
                 for c in self.cubes:
                     if c.carried:
@@ -1035,9 +1175,48 @@ class Level(Room):
                 self.card_t = min(self.card_t, 0.4)
         self.preview = self.trace(p, aim) if RUN["device"] else None
         self.guide_step(dt)
+        self.fx_step(dt, p)
 
         self.last_vy, self.last_top, self.last_cx = p.vy, p.rect.top, p.rect.centerx
         self.last_on = p.on is not None
+
+    def fx_step(self, dt, p):
+        """Particles, the screen flash, light from portals in the dark, and sounds for doors and buttons."""
+        for q in self.parts:
+            q[0] += q[2] * dt
+            q[1] += q[3] * dt
+            q[3] += 600 * dt
+            q[4] -= dt
+        self.parts = [q for q in self.parts if q[4] > 0]
+        if self.flash:
+            color, left = self.flash
+            self.flash = (color, left - dt) if left > dt else None
+        flying = abs(self.fling) > 250
+        if self.was_flying and not flying and p.on is not None:       # landing after a portal flight: dust
+            self.effect(None, p.rect.centerx, p.rect.bottom, (200, 204, 214), 12, 140)
+        self.was_flying = flying
+        for b in self.buttons:
+            if b.down and not self.was_down.get(id(b)):
+                self.effect("button", b.rect.centerx, b.rect.top, (90, 220, 120), 8, 90)
+            self.was_down[id(b)] = b.down
+        for d in self.doors:
+            if d.want != self.was_open.get(id(d), d.want) and not getattr(d, "glass", False):
+                sfx("door")
+            self.was_open[id(d)] = d.want
+        bridge = any(br in self.platforms for br in self.bridges)
+        if bridge and not self.was_bridge and not self.from_east:
+            sfx("bridge")
+        self.was_bridge = bridge
+        lights = []
+        for pt in self.portals.values():
+            if pt:
+                lights.append((pt.box.centerx, pt.box.centery, 70))
+        if self.pedestal:
+            lights.append((self.pedestal.rect.centerx, self.pedestal.rect.top + 18, 60))
+        for br in self.bridges:
+            if br in self.platforms:
+                lights += [(x, br.rect.top, 50) for x in range(br.rect.left + 30, br.rect.right, 90)]
+        self.lights = lights
 
     def guide_step(self, dt):
         self.step_flash = max(0.0, self.step_flash - dt)
@@ -1047,6 +1226,7 @@ class Level(Room):
         if i != self.step_i:
             if self.step_i >= 0:
                 self.step_flash = 0.6
+                sfx("step")
             self.step_i = i
             self.step_img = self.render_step()
         target = self.steps[self.step_i][2]() if self.steps else None
@@ -1112,8 +1292,12 @@ class Level(Room):
     def bump(self, c):
         c.bounce = 1.0
         if c.used:
+            sfx("bump")
             return
         c.used = True
+        big = c.contents != "coin"
+        self.effect("power" if big else "bump", c.rect.centerx, c.rect.top, Crate.ICON[c.contents], 16 if big else 8,
+                    flash=Crate.ICON[c.contents] if big else None)
         RUN["taken"].add(c.key)
         if c.contents == "coin":
             self.add_coins(1, "Coin")
@@ -1135,6 +1319,8 @@ class Level(Room):
                 RUN["taken"].add(coin.key)
                 self.add_coins(1)
         if self.pedestal and r.colliderect(self.pedestal.rect):
+            self.effect("device", self.pedestal.rect.centerx, self.pedestal.rect.top + 18, BLUE, 12, flash=(150, 210, 255))
+            self.effect(None, self.pedestal.rect.centerx, self.pedestal.rect.top + 18, ORANGE, 12)
             self.pedestal = None
             RUN["device"] = True
             if not RUN["card"]:
@@ -1196,14 +1382,17 @@ class Level(Room):
         self.shot = (start, end, rgb, 0.12)
         if panel is None:
             self.say("Portals only open on white panels", 1.0)
+            self.effect("fizzle", end[0], end[1], (230, 70, 60), 8, 100)
             return
         along = end[1] if panel.vertical else end[0]
         new = Portal(rgb, panel, along)
         other = self.portals["orange" if color == "blue" else "blue"]
         if other and other.panel is panel and abs(other.c - new.c) < (new.hi - new.lo):
             self.say("Too close to the other portal", 1.0)
+            sfx("fizzle")
             return
         self.portals[color] = new
+        self.effect(color, new.box.centerx, new.box.centery, rgb, 14, 140)
 
     def emerge(self, p, dst, speed):
         n = dst.normal
@@ -1224,6 +1413,7 @@ class Level(Room):
         self.last_top = p.rect.top
         self.last_cx = p.rect.centerx
         self.burst = (dst.box.centerx, dst.box.centery, dst.color, 0.35)
+        self.effect("warp", dst.box.centerx, dst.box.centery, dst.color, 16, 200)
 
     # --- cubes -------------------------------------------------------------------------------------------
     def cube_step(self, dt, p, pressed):
@@ -1239,14 +1429,17 @@ class Level(Room):
                     x = p.rect.centerx - Cube.S / 2
                 held.x, held.y, held.vy = float(x), float(p.rect.bottom - Cube.S), 0.0
                 held = None
+                sfx("drop")
             elif not on_lift:
                 near = p.rect.inflate(30, 20)
                 cube = next((c for c in self.cubes if near.colliderect(c.rect)), None)
                 switch = next((s for s in self.switches if near.colliderect(s.rect)), None)
                 if cube:
                     cube.carried = True
+                    sfx("grab")
                 elif switch:
                     switch.left = switch.seconds
+                    sfx("button")
                     self.say(f"Bridge on: {switch.seconds} seconds!", 1.2)
         for c in self.cubes:
             if c.carried:
@@ -1257,6 +1450,7 @@ class Level(Room):
                 c.fall(dt, self)
                 for h in self.hazards:
                     if isinstance(h, Goo) and h.rect.colliderect(c.rect):
+                        self.effect("fizzle", c.rect.centerx, c.rect.top, GOO, 10)
                         c.respawn()
 
     # --- drawing -----------------------------------------------------------------------------------------
@@ -1314,6 +1508,15 @@ class Level(Room):
         if self.shot:
             a, b, rgb, _ = self.shot
             pygame.draw.line(surf, rgb, a, b, 3)
+        for x, y, _vx, _vy, life, full, color, size in self.parts:
+            pygame.draw.circle(surf, color, (int(x), int(y)), max(1, int(size * life / full + 0.5)))
+        if self.flash:
+            color, left = self.flash
+            tint = getattr(self, "_tint", None)
+            if tint is None:
+                tint = self._tint = pygame.Surface((C.W, C.H), pygame.SRCALPHA)     # made once per room
+            tint.fill((*color, int(110 * left / 0.18)))
+            surf.blit(tint, (0, 0))
         self.draw_arrow(surf)
         self.draw_hud(surf)
 
@@ -1566,7 +1769,7 @@ class FabricationBay(Level):
         wall_panel = self.wall.panels[0]
         across = lambda: p().x > 680
         return [
-            ("Stand by the cube and press F to pick it up", lambda: self.cube.carried or across(),
+            ("Stand by the cube, press DOWN to pick it up", lambda: self.cube.carried or across(),
              lambda: self.center_top(self.cube.rect)),
             ("Stand on the yellow lift, hold UP to ride it", lambda: self.lift.rect.top <= 160 or across(),
              lambda: self.center_top(self.lift.rect)),
@@ -1575,7 +1778,7 @@ class FabricationBay(Level):
             ("Put the other on the wall panel to your left", lambda: self.portal_on(wall_panel) or across(),
              lambda: wall_panel.rect.center),
             ("Step off the lift: drop into the floor portal", across, lambda: self.portal_at(self.floor_panel)),
-            ("Press F to set the cube on the button", lambda: self.button.down,
+            ("Press DOWN to set the cube on the button", lambda: self.button.down,
              lambda: self.center_top(self.button.rect)),
             ("The door is open: go right", _never, lambda: (self.door.rect.centerx, 440)),
         ]
@@ -1611,7 +1814,7 @@ class XRTracking(Level):
         return [
             ("Jump into the crates: a star and a helmet", lambda: (self.crate_a.used and self.crate_b.used)
              or p().x > 230, lambda: (160, 372)),
-            ("Press F at the switch: a bridge for 5 seconds", lambda: self.switch.left > 0 or p().x > 620,
+            ("Press DOWN at the switch: a bridge for 5 s", lambda: self.switch.left > 0 or p().x > 620,
              lambda: self.center_top(self.switch.rect)),
             ("Hurry across the light bridge", lambda: p().x > 620, lambda: (460, 430)),
             ("Get on the ledge, then drop onto the turret", lambda: bool(self.turret.down) or p().x > 860,
@@ -1625,6 +1828,7 @@ class XRHoloStage(Level):
     in front of the headset vault, which holds the floor's code digit."""
 
     title = "Level 5 - XR Holo Stage"
+    dark = 0.42
     number, name, accent, stripe_x = 5, "XR HOLO STAGE", (40, 200, 255), 380
     vents = ((300, 330),)
     needs_device = True
@@ -1666,9 +1870,9 @@ class XRHoloStage(Level):
             ("Put the other on the wall panel above the ledge", lambda: self.portal_on(wall_panel) or up_top(),
              lambda: wall_panel.rect.center),
             ("Walk into the floor portal: up to the cube", up_top, lambda: self.portal_at(self.floor_panel)),
-            ("Press F to grab the cube, then walk off the ledge", lambda: self.cube.carried or self.button.down,
+            ("DOWN grabs the cube; then walk off the ledge", lambda: self.cube.carried or self.button.down,
              lambda: self.center_top(self.cube.rect)),
-            ("Press F to set the cube on the button: lasers off", lambda: self.button.down,
+            ("DOWN sets the cube on the button: lasers off", lambda: self.button.down,
              lambda: self.center_top(self.button.rect)),
             ("Climb to the headset vault. Hold UP to search it", lambda: self.vault.searched,
              lambda: self.center_top(self.vault.rect)),
