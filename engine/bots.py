@@ -65,17 +65,22 @@ class Zapper:
     """A floor-to-ceiling beam that switches on and off. x is its centre; it spans y_top..y_bottom.
 
     on_time and off_time are seconds; offset shifts it in the cycle so two zappers can alternate.
+    For the last WARN seconds before it switches on, a faint flicker shows it's about to fire; it can't
+    catch you until it's really on.
     """
+
+    WARN = 0.5
 
     def __init__(self, x, y_top=0, y_bottom=C.FLOOR_Y, on_time=1.5, off_time=1.5, offset=0.0):
         self.on_time, self.off_time, self.t = on_time, off_time, offset
-        self.on = False
+        self.on = self.warning = False
         self.box = pygame.Rect(int(x) - 4, int(y_top), 8, int(y_bottom - y_top))
         self.rect = pygame.Rect(0, 0, 0, 0)
 
     def update(self, dt, room, player):
         self.t = (self.t + dt) % (self.on_time + self.off_time)
         self.on = self.t < self.on_time
+        self.warning = not self.on and (self.on_time + self.off_time) - self.t <= min(self.WARN, self.off_time)
         self.rect = self.box if self.on else pygame.Rect(0, 0, 0, 0)
 
     def draw(self, surf):
@@ -84,3 +89,60 @@ class Zapper:
         if self.on:
             pygame.draw.rect(surf, C.DANGER, self.box)
             pygame.draw.rect(surf, (255, 200, 190), self.box.inflate(-4, 0))
+        elif self.warning and int(self.t * 20) % 2:
+            pygame.draw.line(surf, (170, 80, 80), self.box.midtop, self.box.midbottom, 1)
+
+
+class SecurityCamera:
+    """A ceiling camera that sweeps a spotlight back and forth along a surface. Step into the lit spot and
+    you're caught; jump over it, or wait while it pauses at the end of its sweep.
+
+    x is where the camera hangs (from the ceiling at y=46). The spot sweeps between left and right along the
+    surface at y (C.FLOOR_Y for the ground, or a platform's y), at speed px/s, and waits `pause` seconds at
+    each end. spot is how wide the lit spot is. offset (px) starts the spot further along its sweep.
+    """
+
+    MOUNT_Y = 46
+
+    def __init__(self, x, y=C.FLOOR_Y, left=None, right=None, speed=110.0, pause=0.6, spot=70, offset=0.0):
+        self.x, self.y_surface = int(x), int(y)
+        self.left = int(left if left is not None else x - 200)
+        self.right = int(right if right is not None else x + 200)
+        self.speed, self.pause, self.spot = float(speed), float(pause), int(spot)
+        self.cx = float(min(self.right, self.left + offset))
+        self.dir = 1                # which way the spot is moving (a moving hazard: not a doorway blocker)
+        self.wait = 0.0
+        self.rect = pygame.Rect(0, 0, 0, 0)
+        self.glow = pygame.Surface((self.spot, 18), pygame.SRCALPHA)     # made once, not every frame
+        pygame.draw.ellipse(self.glow, (255, 240, 170, 110), self.glow.get_rect())
+        self._place()
+
+    def _place(self):
+        # The part that catches you: the lit patch, from the surface up to ankle height.
+        self.rect = pygame.Rect(int(self.cx - self.spot / 2) + 6, self.y_surface - 14, self.spot - 12, 14)
+
+    def update(self, dt, room, player):
+        if self.wait > 0:
+            self.wait -= dt
+        else:
+            self.cx += self.dir * self.speed * dt
+            if self.cx >= self.right:
+                self.cx, self.dir, self.wait = float(self.right), -1, self.pause
+            elif self.cx <= self.left:
+                self.cx, self.dir, self.wait = float(self.left), 1, self.pause
+        self._place()
+
+    def draw(self, surf):
+        cam = (self.x, self.MOUNT_Y + 10)
+        half = self.spot // 2
+        beam = (255, 236, 160)
+        pygame.draw.line(surf, beam, cam, (int(self.cx) - half, self.y_surface), 1)
+        pygame.draw.line(surf, beam, cam, (int(self.cx) + half, self.y_surface), 1)
+        surf.blit(self.glow, (int(self.cx) - half, self.y_surface - 9))
+        pygame.draw.rect(surf, (90, 90, 100), (self.x - 3, self.MOUNT_Y - 6, 6, 8))
+        body = pygame.Rect(0, 0, 26, 14)
+        body.center = cam
+        pygame.draw.rect(surf, (200, 202, 210), body, border_radius=4)
+        pygame.draw.rect(surf, C.INK, body, 2, border_radius=4)
+        lens_x = body.centerx + (6 if self.cx > self.x else -6)
+        pygame.draw.circle(surf, C.DANGER, (lens_x, body.centery + 2), 3)
