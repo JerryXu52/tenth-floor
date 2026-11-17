@@ -35,7 +35,7 @@ def elevator(g, surf):
     surf.fill((34, 36, 46))
     cy = C.H // 2 + 70
     stops = g.stops[g.shaft]
-    for f in range(1, g.top + 1):
+    for f in range(min(1, g.stops["west"][0]), g.top + 1):
         y = int(cy - (f - g.floor) * SPACING)
         if y < -SPACING or y > C.H + SPACING:
             continue
@@ -45,7 +45,7 @@ def elevator(g, surf):
         dx = SHAFT_R + 20 if g.shaft == "west" else SHAFT_L - 90
         door = pygame.Rect(dx, y - 90, 70, 90)
         num_x = door.right + 40 if g.shaft == "west" else door.left - 40
-        g.text(surf, f"{f}", g.big, (90, 96, 116) if stop else (60, 64, 76), center=(num_x, y - 45))
+        g.text(surf, building.label(f), g.big, (90, 96, 116) if stop else (60, 64, 76), center=(num_x, y - 45))
         if not stop:
             label = "(this elevator doesn't stop here)"
             pygame.draw.rect(surf, (48, 50, 58), door)
@@ -87,7 +87,7 @@ def elevator(g, surf):
     panel = pygame.Rect(0, 34, C.W, 62)
     pygame.draw.rect(surf, (24, 26, 34), panel)
     out = "RIGHT" if g.shaft == "west" else "LEFT"
-    g.text(surf, f"{g.shaft.upper()} ELEVATOR  -  floor {f}  -  UP / DOWN to ride, {out} to step out",
+    g.text(surf, f"{g.shaft.upper()} ELEVATOR  -  floor {building.label(f)}  -  UP / DOWN to ride, {out} to step out",
               g.small, (170, 176, 190), center=(C.W // 2, 50))
     g.text(surf, name, g.mid, C.HUD, center=(C.W // 2, 76))
 
