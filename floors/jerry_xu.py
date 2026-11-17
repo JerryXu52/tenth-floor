@@ -10,8 +10,12 @@ Controls, on top of the engine's (arrows / WASD to move, SPACE to jump, UP to se
     Right click  orange portal    (or Q)
     F or DOWN    grab / drop a cube, press a switch
 
-Levels, west to east:   1 Freight Hall  ->  2 Installation Lab  ->  3 Fabrication Bay
+Levels, west to east:   1 Orientation (the tutorial)  ->  2 Installation Lab  ->  3 Fabrication Bay
                         ->  4 XR Tracking Floor  ->  5 XR Holo Stage (the code digit)
+
+Every level has a step-by-step guide (top left) and an arrow over what to do next. With the portal
+device, a dotted line shows where a portal would land: a ring on a white panel, a red X anywhere else.
+The look: white industrial lab walls, with fast diagonal stripes and speed streaks when you fly.
 Coming in from the east (floor 12 is reached by the East elevator), doors and bridges you arrive
 behind are already open, so each level can be crossed from either side. The digit's own puzzle
 (cube on the button turns off the laser grid) has to be solved from whichever side you come in.
@@ -21,7 +25,7 @@ import math
 import pygame
 
 from engine import config as C
-from engine.kit import FilingCabinet, Locker, Plant, Plinth, Printer3D, ServerRack, Sign, Window, Easel, CeilingLight
+from engine.kit import CeilingLight, Easel, FilingCabinet, Locker, Plant, Plinth, Poster, Printer3D, ServerRack, Window
 from engine.player import Player
 from engine.room import Furniture, Lift, Platform, Room
 
@@ -32,7 +36,7 @@ PW, PH = Player.W, Player.H
 
 # What you carry from level to level (kept across rooms; the engine rebuilds a room every time you enter it).
 RUN = {"coins": 0, "taken": set(), "device": False, "boots": False, "helmet": False, "star": 0.0,
-       "helmet_at": 20}
+       "helmet_at": 20, "card": False}
 
 BLUE = (70, 160, 255)
 ORANGE = (255, 150, 40)
@@ -40,6 +44,8 @@ PANEL = (226, 230, 236)
 CONCRETE = (58, 60, 70)
 GOO = (120, 200, 60)
 HARD_LIGHT = (130, 210, 255)
+GUIDE = (255, 214, 90)
+INK2 = (14, 16, 22)
 
 _FONTS = {}
 
@@ -133,9 +139,11 @@ class Wall:
     def draw(self, surf):
         r = self.rect
         pygame.draw.rect(surf, CONCRETE, r)
+        pygame.draw.rect(surf, (74, 77, 90), (r.left, r.top, r.width, 4))           # lit top edge
+        pygame.draw.rect(surf, (48, 50, 58), (r.right - 5, r.top, 5, r.height))     # shaded side
         for y in range(r.top + 24, r.bottom, 24):
-            pygame.draw.line(surf, (50, 52, 60), (r.left, y), (r.right - 1, y), 1)
-        pygame.draw.rect(surf, C.INK, r, 2)
+            pygame.draw.line(surf, (50, 52, 60), (r.left + 2, y), (r.right - 6, y), 1)
+        pygame.draw.rect(surf, INK2, r, 2)
 
 
 class Door(Wall):
@@ -157,14 +165,42 @@ class Door(Wall):
 
     def draw(self, surf):
         r = self.rect
-        pygame.draw.rect(surf, (40, 42, 50), r, 2)
+        pygame.draw.rect(surf, (36, 38, 46), r.inflate(6, 0), 3)                   # the frame
         h = int(r.height * (1 - self.open))
         if h > 0:
             body = pygame.Rect(r.left, r.top, r.width, h)
-            pygame.draw.rect(surf, (96, 100, 116), body)
-            pygame.draw.rect(surf, C.INK, body, 2)
+            pygame.draw.rect(surf, (104, 108, 124), body)
+            for y in range(body.bottom - 14, body.top, -28):
+                pygame.draw.line(surf, (88, 92, 106), (body.left + 3, y), (body.right - 3, y), 2)
+            pygame.draw.rect(surf, (230, 190, 60), (body.left, body.bottom - 10, body.width, 10))
+            for x in range(body.left - 6, body.right, 8):                             # hazard stripes at the foot
+                pygame.draw.line(surf, INK2, (x, body.bottom), (x + 8, body.bottom - 10), 2)
+            pygame.draw.rect(surf, INK2, body, 2)
             lamp = (90, 220, 120) if self.want else C.DANGER
-            pygame.draw.circle(surf, lamp, (r.centerx, body.bottom - 16), 5)
+            pygame.draw.circle(surf, lamp, (r.centerx, body.bottom - 22), 5)
+
+
+class GlassWall(Door):
+    """A pane of glass: you can't walk through it, but portal shots go straight through.
+    It's open from the start if you come in from the east."""
+
+    glass = True
+
+    def __init__(self, x, y, w, h):
+        super().__init__(x, y, w, h, link="glass")
+        self.pane = pygame.Surface((w, h), pygame.SRCALPHA)                 # made once, not every frame
+        self.pane.fill((150, 210, 255, 60))
+        for k in range(0, h, 90):
+            pygame.draw.line(self.pane, (255, 255, 255, 130), (2, k + 30), (w - 3, k + 10), 2)
+
+    def draw(self, surf):
+        r = self.rect
+        h = int(r.height * (1 - self.open))
+        pygame.draw.rect(surf, (60, 64, 76), (r.left - 4, r.top - 6, r.width + 8, 6))
+        pygame.draw.rect(surf, (60, 64, 76), (r.left - 4, r.bottom, r.width + 8, 4))
+        if h > 0:
+            surf.blit(self.pane, r.topleft, (0, r.height - h, r.width, h))
+            pygame.draw.rect(surf, (90, 150, 200), (r.left, r.top, r.width, h), 2)
 
 
 class Panel:
@@ -183,8 +219,17 @@ class Panel:
             self.rect = pygame.Rect(start, r.bottom, end - start, 4)
         self.vertical = face in ("left", "right")
 
-    def draw(self, surf):
-        pygame.draw.rect(surf, PANEL, self.rect)
+    highlight = False        # the guide sets this on the panel it wants you to shoot
+
+    def draw(self, surf, t=0.0):
+        r = self.rect
+        glow = 0.5 + 0.5 * math.sin(t * 5)
+        edge = (int(60 + 120 * glow), int(190 + 60 * glow), 255) if self.highlight else (60, 190, 255)
+        pygame.draw.rect(surf, INK2, r.inflate(10, 10), border_radius=3)        # a dark frame, so white
+        pygame.draw.rect(surf, edge, r.inflate(6, 6), border_radius=2)          # panels stand out on white walls
+        pygame.draw.rect(surf, (250, 252, 255), r)
+        if self.highlight:
+            pygame.draw.rect(surf, edge, r.inflate(16 + int(6 * glow), 16 + int(6 * glow)), 2, border_radius=4)
 
 
 class FloorPanel(Panel):
@@ -207,6 +252,15 @@ class Portal:
         self.lo, self.hi = self.c - half, self.c + half
         self.face_at = {"left": r.left, "right": r.right, "up": r.top, "down": r.bottom}[self.normal]
         self.t = 0.0
+        if panel.vertical:
+            self.box = pygame.Rect(0, 0, 20, int(self.hi - self.lo))
+            self.box.center = (self.face_at, int(self.c))
+        else:
+            self.box = pygame.Rect(0, 0, int(self.hi - self.lo), 16)
+            self.box.center = (int(self.c), self.face_at)
+        self.halo = pygame.Surface(self.box.inflate(28, 28).size, pygame.SRCALPHA)   # made once
+        for k, a in ((0, 40), (8, 60), (14, 90)):
+            pygame.draw.ellipse(self.halo, (*color, a), self.halo.get_rect().inflate(-k, -k))
 
     def entering(self, p, room):
         """Is the player going in? Returns their speed if so, else None."""
@@ -229,15 +283,17 @@ class Portal:
 
     def draw(self, surf):
         self.t += 1 / 60
-        glow = 2 + int(2 * math.sin(self.t * 6))
-        if self.panel.vertical:
-            box = pygame.Rect(0, 0, 18, self.hi - self.lo)
-            box.center = (self.face_at, int(self.c))
-        else:
-            box = pygame.Rect(0, 0, self.hi - self.lo, 14)
-            box.center = (int(self.c), self.face_at)
-        pygame.draw.ellipse(surf, (20, 20, 26), box)
-        pygame.draw.ellipse(surf, self.color, box, 3 + glow // 2)
+        box = self.box
+        surf.blit(self.halo, box.inflate(28, 28).topleft)
+        pygame.draw.ellipse(surf, (16, 18, 26), box)
+        if min(box.size) > 12:
+            pygame.draw.ellipse(surf, tuple(c // 3 for c in self.color), box.inflate(-6, -6), 2)
+        pygame.draw.ellipse(surf, self.color, box, 3)
+        a = self.t * 4                                                     # two sparks circling the rim
+        for k in (0, math.pi):
+            sx = box.centerx + math.cos(a + k) * box.width / 2
+            sy = box.centery + math.sin(a + k) * box.height / 2
+            pygame.draw.circle(surf, (255, 255, 255), (int(sx), int(sy)), 2)
 
 
 class Coin:
@@ -271,12 +327,16 @@ class Crate(Platform):
     def draw(self, surf):
         r = self.rect.move(0, -int(6 * math.sin(self.bounce * math.pi)) if self.bounce > 0 else 0)
         if self.used:
-            pygame.draw.rect(surf, (110, 100, 90), r, border_radius=4)
+            pygame.draw.rect(surf, (128, 132, 142), r, border_radius=4)
+            pygame.draw.rect(surf, (104, 108, 118), r.inflate(-12, -12), 2, border_radius=3)
         else:
-            pygame.draw.rect(surf, (210, 150, 60), r, border_radius=4)
-            pygame.draw.rect(surf, (250, 220, 140), r.inflate(-14, -14), 2, border_radius=3)
+            pygame.draw.rect(surf, (214, 154, 62), r, border_radius=4)
+            pygame.draw.rect(surf, (238, 186, 92), (r.left + 2, r.top + 2, r.width - 4, 8), border_radius=3)
+            pygame.draw.rect(surf, (170, 116, 44), (r.left + 2, r.bottom - 8, r.width - 4, 6), border_radius=3)
+            pygame.draw.rect(surf, (250, 222, 150), r.inflate(-14, -14), 2, border_radius=3)
             pygame.draw.circle(surf, self.ICON[self.contents], r.center, 6)
-        pygame.draw.rect(surf, C.INK, r, 2, border_radius=4)
+            pygame.draw.circle(surf, INK2, r.center, 6, 1)
+        pygame.draw.rect(surf, INK2, r, 2, border_radius=4)
 
 
 class Spring(Platform):
@@ -298,6 +358,21 @@ class Spring(Platform):
             y = top.bottom + i * 2
             pygame.draw.line(surf, (200, 200, 210), (r.left + 10, y), (r.right - 10, y), 1)
         pygame.draw.rect(surf, (230, 80, 80), top, border_radius=3)
+
+
+class Ledge(Platform):
+    """A steel catwalk: an ordinary one-way ledge with a nicer look."""
+
+    def draw(self, surf):
+        r = self.rect
+        for x in (r.left + 14, r.right - 14):
+            pygame.draw.line(surf, (70, 74, 86), (x, r.bottom), (x - 10, r.bottom + 14), 3)
+        pygame.draw.rect(surf, (96, 102, 116), r, border_radius=2)
+        pygame.draw.rect(surf, (168, 174, 188), (r.left, r.top, r.width, 3))
+        pygame.draw.rect(surf, GUIDE, (r.left, r.bottom - 3, r.width, 3))
+        for x in range(r.left + 10, r.right - 6, 26):
+            pygame.draw.circle(surf, (70, 74, 86), (x, r.top + 7), 2)
+        pygame.draw.rect(surf, INK2, r, 1, border_radius=2)
 
 
 class LightBridge(Platform):
@@ -691,13 +766,110 @@ class _WorldLayer:
         self.room.draw_world(surf)
 
 
+_BACKGROUNDS = {}       # one painted wall per level class, made the first time it's drawn
+_CARD = None            # the portal device's controls card, made once
+
+
+DEVICE_STEP = "Walk into the portal device to pick it up"
+
+
+def _never():
+    return False
+
+
+def _paint_background(level):
+    """The white industrial lab wall for one level: panels, seams, rivets, vents, a hazard band, a big level
+    number and a fast diagonal stripe in the level's accent colour. Painted once, then just blitted."""
+    bg = pygame.Surface((C.W, C.H))
+    top, bottom = (232, 235, 240), (204, 209, 217)
+    for y in range(C.FLOOR_Y):
+        f = y / C.FLOOR_Y
+        bg.fill(tuple(int(top[i] + (bottom[i] - top[i]) * f) for i in range(3)), (0, y, C.W, 1))
+    accent = level.accent
+    # speed stripes: two long diagonals across the wall, behind everything
+    stripes = pygame.Surface((C.W, C.FLOOR_Y), pygame.SRCALPHA)
+    for x0, w, a in ((level.stripe_x, 70, 60), (level.stripe_x + 110, 22, 80), (level.stripe_x + 150, 8, 90)):
+        pygame.draw.polygon(stripes, (*accent, a), [(x0, C.FLOOR_Y), (x0 + w, C.FLOOR_Y),
+                                                    (x0 + w + 380, 0), (x0 + 380, 0)])
+    bg.blit(stripes, (0, 0))
+    # wall panels with seams and rivets
+    for x in range(0, C.W, 160):
+        pygame.draw.line(bg, (176, 182, 192), (x, 36), (x, C.FLOOR_Y), 2)
+        pygame.draw.line(bg, (246, 248, 250), (x + 2, 36), (x + 2, C.FLOOR_Y), 1)
+    for y in (156, 296):
+        pygame.draw.line(bg, (176, 182, 192), (0, y), (C.W, y), 2)
+        pygame.draw.line(bg, (246, 248, 250), (0, y + 2), (C.W, y + 2), 1)
+    for x in range(10, C.W, 160):
+        for y in (46, 166, 306, 420):
+            for dx in (0, 140):
+                pygame.draw.circle(bg, (160, 166, 178), (x + dx, y), 2)
+    # the big painted level number
+    num = _font(190).render(f"{level.number:02d}", True, (214, 218, 226))
+    bg.blit(num, (C.W - num.get_width() - 30, 40))
+    # vents
+    for vx, vy in level.vents:
+        pygame.draw.rect(bg, (120, 126, 138), (vx, vy, 64, 40), border_radius=4)
+        for k in range(6):
+            pygame.draw.line(bg, (80, 84, 96), (vx + 6, vy + 7 + k * 5), (vx + 58, vy + 7 + k * 5), 2)
+    # ceiling rail and the lower wall: dark wainscot, an accent band, and a hazard stripe at the floor
+    pygame.draw.rect(bg, (60, 64, 76), (0, 0, C.W, 36))
+    pygame.draw.rect(bg, (178, 184, 194), (0, 440, C.W, C.FLOOR_Y - 440))
+    pygame.draw.rect(bg, accent, (0, 440, C.W, 5))
+    pygame.draw.rect(bg, (230, 190, 60), (0, C.FLOOR_Y - 9, C.W, 9))
+    for x in range(-10, C.W, 18):
+        pygame.draw.polygon(bg, (34, 36, 44), [(x, C.FLOOR_Y), (x + 8, C.FLOOR_Y), (x + 17, C.FLOOR_Y - 9),
+                                               (x + 9, C.FLOOR_Y - 9)])
+    return bg
+
+
+def _plaque(text, size=20, accent=GUIDE):
+    """A dark sign plate with a coloured edge, for on-wall instructions."""
+    img = _font(size).render(text, True, (240, 242, 246))
+    plate = pygame.Surface((img.get_width() + 22, img.get_height() + 10), pygame.SRCALPHA)
+    pygame.draw.rect(plate, (24, 28, 38, 225), plate.get_rect(), border_radius=5)
+    pygame.draw.rect(plate, accent, (0, 0, 5, plate.get_height()), border_top_left_radius=5,
+                     border_bottom_left_radius=5)
+    plate.blit(img, (14, 5))
+    return plate
+
+
+def _controls_card():
+    """The card that appears the first time you pick up the portal device."""
+    global _CARD
+    if _CARD is not None:
+        return _CARD
+    lines = [("Mouse", "aim (the dotted line shows where it lands)", (230, 232, 238)),
+             ("LEFT click  or  E", "BLUE portal", BLUE),
+             ("RIGHT click  or  Q", "ORANGE portal", ORANGE),
+             ("WHITE panels", "the only surfaces portals stick to", (150, 230, 255)),
+             ("Walk or fall in", "you come out of the other one, just as fast", (230, 232, 238))]
+    w, h = 560, 58 + 34 * len(lines) + 20
+    card = pygame.Surface((w, h), pygame.SRCALPHA)
+    pygame.draw.rect(card, (20, 24, 34, 240), card.get_rect(), border_radius=10)
+    pygame.draw.rect(card, (150, 230, 255), card.get_rect(), 2, border_radius=10)
+    pygame.draw.rect(card, BLUE, (18, 20, 18, 18), border_radius=9)
+    pygame.draw.rect(card, ORANGE, (40, 20, 18, 18), border_radius=9)
+    card.blit(_font(34).render("PORTAL DEVICE", True, (255, 255, 255)), (68, 16))
+    for i, (key, what, color) in enumerate(lines):
+        y = 62 + i * 34
+        card.blit(_font(24).render(key, True, color), (22, y))
+        card.blit(_font(24).render(what, True, (200, 204, 214)), (210, y))
+    card.blit(_font(20).render("(this closes on its own; it'll be in the guide too)", True, (140, 146, 160)),
+              (22, h - 26))
+    _CARD = card
+    return card
+
+
 # --- the level room --------------------------------------------------------------------------------
 
 class Level(Room):
-    """A room with platformer and portal pieces. Subclasses fill in layout()."""
+    """A room with platformer and portal pieces. Subclasses fill in layout() and guide()."""
 
     number = 0
-    palette = ((70, 74, 88), (78, 82, 96))
+    name = "LEVEL"
+    accent = (255, 150, 40)
+    stripe_x = 120
+    vents = ((60, 330),)
     needs_device = False
     spare_device = (110, 840)     # where a spare device appears if you arrive without one: (from west, from east)
 
@@ -719,8 +891,13 @@ class Level(Room):
         self.msg, self.msg_t = "", 0.0
         self.shot = None             # (start, end, color, seconds) of the last portal shot, for drawing
         self.aim = None
+        self.preview = None          # (start, end, panel or None) where a portal would land right now
         self.player = None
         self.t = 0.0
+        self.trail = []              # recent player positions while moving fast, for the speed streaks
+        self.burst = None            # (x, y, color, seconds left) when you come out of a portal
+        self.card_t = 0.0
+        self.steps, self.step_i, self.step_img, self.step_flash = [], -1, None, 0.0
         self.layout()
         for w in self.walls:
             self.panels += w.panels
@@ -730,6 +907,10 @@ class Level(Room):
 
     def layout(self):
         raise NotImplementedError
+
+    def guide(self):
+        """The steps for this level, in order: (text, done(), target() -> (x, y) or None)."""
+        return []
 
     # helpers for layout()
     def coin_row(self, x0, y, n, gap=30):
@@ -751,9 +932,10 @@ class Level(Room):
         c = Crate(f"{type(self).__name__}:crate:{x},{top}", x, top, contents)
         self.crates.append(c)
         self.platforms.append(c)
+        return c
 
     def hint(self, x, y, text):
-        self.hints.append((_font(20).render(text, True, (220, 224, 232)), (x, y)))
+        self.hints.append((_plaque(text, accent=self.accent), (x, y)))
 
     def say(self, text, seconds=1.6):
         self.msg, self.msg_t = text, seconds
@@ -769,6 +951,18 @@ class Level(Room):
         if why:
             self.say(f"{why}  +{n}", 1.0)
 
+    # guide helpers
+    def portal_on(self, panel):
+        return any(pt and pt.panel is panel for pt in self.portals.values())
+
+    def portal_at(self, panel):
+        pt = next((pt for pt in self.portals.values() if pt and pt.panel is panel), None)
+        return pt.box.center if pt else panel.rect.center
+
+    @staticmethod
+    def center_top(rect):
+        return rect.centerx, rect.top
+
     # --- every frame --------------------------------------------------------------------------------
     def update(self, dt, p):
         if p is None:
@@ -780,6 +974,9 @@ class Level(Room):
             self.from_east = p.x > C.W / 2
             if self.needs_device and not RUN["device"]:
                 self.pedestal = DevicePedestal(self.spare_device[1 if self.from_east else 0])
+            self.steps = [st for st in self.guide() if not (RUN["device"] and st[0] == DEVICE_STEP)]
+            if self.from_east and not getattr(self, "guide_both_ways", False):
+                self.steps = [("You came in from the east: the way west is open", _never, lambda: None)]
         pressed, aim = INPUT.poll()
         self.aim = aim
 
@@ -822,8 +1019,55 @@ class Level(Room):
                         c.respawn()
                         self.say("The cube dissolved; a new one drops in", 1.6)
 
+        # speed streaks, the exit burst, the card, and the guide
+        fast = abs(self.fling) > 250 or abs(p.vy) > 620
+        if fast:
+            self.trail.append((p.rect.centerx, p.rect.centery))
+            del self.trail[:-7]
+        elif self.trail:
+            self.trail.pop(0)
+        if self.burst:
+            x, y, color, left = self.burst
+            self.burst = (x, y, color, left - dt) if left > dt else None
+        if self.card_t > 0:
+            self.card_t = max(0.0, self.card_t - dt)
+            if self.portals["blue"] and self.portals["orange"]:
+                self.card_t = min(self.card_t, 0.4)
+        self.preview = self.trace(p, aim) if RUN["device"] else None
+        self.guide_step(dt)
+
         self.last_vy, self.last_top, self.last_cx = p.vy, p.rect.top, p.rect.centerx
         self.last_on = p.on is not None
+
+    def guide_step(self, dt):
+        self.step_flash = max(0.0, self.step_flash - dt)
+        i = max(self.step_i, 0)
+        while i < len(self.steps) - 1 and self.steps[i][1]():
+            i += 1
+        if i != self.step_i:
+            if self.step_i >= 0:
+                self.step_flash = 0.6
+            self.step_i = i
+            self.step_img = self.render_step()
+        target = self.steps[self.step_i][2]() if self.steps else None
+        for pnl in self.panels:
+            pnl.highlight = target is not None and pnl.rect.collidepoint(target)
+
+    def render_step(self):
+        if not self.steps:
+            return None
+        text = self.steps[self.step_i][0]
+        head = _font(20).render(f"LEVEL {self.number}  {self.name}", True, self.accent)
+        count = _font(20).render(f"STEP {self.step_i + 1}/{len(self.steps)}", True, (170, 176, 190))
+        body = _font(26).render(text, True, (255, 255, 255))
+        w = max(head.get_width() + count.get_width() + 40, body.get_width() + 28)
+        box = pygame.Surface((w, 62), pygame.SRCALPHA)
+        pygame.draw.rect(box, (18, 22, 32, 230), box.get_rect(), border_radius=8)
+        pygame.draw.rect(box, self.accent, (0, 0, 6, 62), border_top_left_radius=8, border_bottom_left_radius=8)
+        box.blit(head, (16, 8))
+        box.blit(count, (w - count.get_width() - 12, 8))
+        box.blit(body, (16, 32))
+        return box
 
     def signals(self, dt):
         p = self.player
@@ -893,7 +1137,11 @@ class Level(Room):
         if self.pedestal and r.colliderect(self.pedestal.rect):
             self.pedestal = None
             RUN["device"] = True
-            self.say("Portal device! Aim with the mouse: left click blue, right click orange", 3.0)
+            if not RUN["card"]:
+                RUN["card"] = True
+                self.card_t = 6.0
+            else:
+                self.say("Portal device: left click blue, right click orange", 2.5)
 
     # --- portals ---------------------------------------------------------------------------------------
     def portal_step(self, dt, p, pressed, aim):
@@ -914,17 +1162,20 @@ class Level(Room):
                 self.portal_cool = 0.3
                 return
 
-    def fire(self, p, color, aim):
+    def trace(self, p, aim):
+        """Where a portal shot from the player toward `aim` lands: (start, end, panel or None).
+        Glass doesn't stop a shot; walls, crates and the floor do."""
         ox, oy = p.rect.centerx, p.rect.centery - 6
         if aim is None:
             aim = (ox + p.facing * 600, oy)
         dx, dy = aim[0] - ox, aim[1] - oy
         d = math.hypot(dx, dy)
         if d < 1:
-            return
+            return None
         dx, dy = dx / d, dy / d
-        best = None                      # (t, panel or None, face)
-        blockers = self.solids() + [pygame.Rect(0, C.FLOOR_Y, C.W, C.H - C.FLOOR_Y)]
+        best = None
+        blockers = [w.rect for w in self.walls if w.solid and not getattr(w, "glass", False)]
+        blockers += [c.rect for c in self.crates] + [pygame.Rect(0, C.FLOOR_Y, C.W, C.H - C.FLOOR_Y)]
         for panel in self.panels:
             hit = _ray_hit(ox, oy, dx, dy, panel.rect)
             if hit and hit[1] == panel.face and (best is None or hit[0] < best[0]):
@@ -934,13 +1185,18 @@ class Level(Room):
             if hit and (best is None or hit[0] < best[0] - 0.5):
                 best = (hit[0], None)
         t = best[0] if best else 1400
-        end = (ox + dx * t, oy + dy * t)
+        return (ox, oy), (ox + dx * t, oy + dy * t), (best[1] if best else None)
+
+    def fire(self, p, color, aim):
+        tr = self.trace(p, aim)
+        if tr is None:
+            return
+        start, end, panel = tr
         rgb = BLUE if color == "blue" else ORANGE
-        self.shot = ((ox, oy), end, rgb, 0.12)
-        if not best or best[1] is None:
+        self.shot = (start, end, rgb, 0.12)
+        if panel is None:
             self.say("Portals only open on white panels", 1.0)
             return
-        panel = best[1]
         along = end[1] if panel.vertical else end[0]
         new = Portal(rgb, panel, along)
         other = self.portals["orange" if color == "blue" else "blue"]
@@ -953,7 +1209,7 @@ class Level(Room):
         n = dst.normal
         if n == "up":
             p.x, p.y = dst.c - PW / 2, dst.face_at - PH - 1
-            p.vy, self.fling = -max(speed, 420.0), 0.0
+            p.vy, self.fling = -max(speed, 420.0), p.facing * 140.0     # a nudge, so you land clear of it
         elif n == "down":
             p.x, p.y = dst.c - PW / 2, dst.face_at + 1
             p.vy, self.fling = max(speed, 60.0), 0.0
@@ -967,6 +1223,7 @@ class Level(Room):
         self.launched = True
         self.last_top = p.rect.top
         self.last_cx = p.rect.centerx
+        self.burst = (dst.box.centerx, dst.box.centery, dst.color, 0.35)
 
     # --- cubes -------------------------------------------------------------------------------------------
     def cube_step(self, dt, p, pressed):
@@ -1004,12 +1261,10 @@ class Level(Room):
 
     # --- drawing -----------------------------------------------------------------------------------------
     def draw_background(self, surf):
-        wall, line = self.palette
-        surf.fill(wall)
-        for x in range(0, C.W, 80):
-            pygame.draw.line(surf, line, (x, 0), (x, C.FLOOR_Y), 1)
-        for y in range(40, C.FLOOR_Y, 80):
-            pygame.draw.line(surf, line, (0, y), (C.W, y), 1)
+        key = type(self)
+        if key not in _BACKGROUNDS:
+            _BACKGROUNDS[key] = _paint_background(self)
+        surf.blit(_BACKGROUNDS[key], (0, 0))
 
     def draw_world(self, surf):
         t = self.t
@@ -1020,7 +1275,7 @@ class Level(Room):
         for w in self.walls:
             w.draw(surf)
         for pnl in self.panels:
-            pnl.draw(surf)
+            pnl.draw(surf, t)
         for f in self.fizzlers:
             f.draw(surf, t)
         for b in self.buttons:
@@ -1041,6 +1296,7 @@ class Level(Room):
     def draw_foreground(self, surf):
         p = self.player
         if p is not None:
+            self.draw_speed(surf, p)
             r = p.rect
             for c in self.cubes:
                 if c.carried:
@@ -1051,42 +1307,118 @@ class Level(Room):
                 pygame.draw.rect(surf, color, r.inflate(8, 8), 2, border_radius=8)
             if RUN["helmet"]:
                 pygame.draw.ellipse(surf, (240, 200, 60), (r.centerx - 10, r.top - 4, 20, 12))
-                pygame.draw.ellipse(surf, C.INK, (r.centerx - 10, r.top - 4, 20, 12), 1)
+                pygame.draw.ellipse(surf, INK2, (r.centerx - 10, r.top - 4, 20, 12), 1)
             if RUN["boots"]:
                 pygame.draw.rect(surf, (90, 200, 255), (r.left, r.bottom - 5, r.width, 5), border_radius=2)
-            if RUN["device"] and self.aim is not None:
-                pygame.draw.circle(surf, (240, 240, 245), self.aim, 7, 1)
-                pygame.draw.circle(surf, BLUE, (self.aim[0] - 3, self.aim[1]), 2)
-                pygame.draw.circle(surf, ORANGE, (self.aim[0] + 3, self.aim[1]), 2)
+            self.draw_aim(surf)
         if self.shot:
             a, b, rgb, _ = self.shot
-            pygame.draw.line(surf, rgb, a, b, 2)
+            pygame.draw.line(surf, rgb, a, b, 3)
+        self.draw_arrow(surf)
         self.draw_hud(surf)
 
+    def draw_speed(self, surf, p):
+        """Speed streaks and after-images while you're moving fast; a ring where you came out of a portal."""
+        if self.burst:
+            x, y, color, left = self.burst
+            rad = int(14 + (0.35 - left) * 160)
+            pygame.draw.circle(surf, color, (x, y), rad, 3)
+            pygame.draw.circle(surf, (255, 255, 255), (x, y), max(2, rad - 10), 1)
+        if len(self.trail) < 2:
+            return
+        n = len(self.trail)
+        for i, (x, y) in enumerate(self.trail[:-1]):
+            k = (i + 1) / n
+            ghost = pygame.Rect(0, 0, PW, PH)
+            ghost.center = (x, y)
+            pygame.draw.rect(surf, self.accent, ghost, 1 + int(k * 2), border_radius=6)
+        hx, hy = self.trail[-1]
+        tx, ty = self.trail[0]
+        for dy in (-14, -4, 6, 16):
+            pygame.draw.line(surf, (255, 255, 255), (tx, ty + dy), (hx, hy + dy), 2)
+            pygame.draw.line(surf, self.accent, (tx, ty + dy + 2), (hx, hy + dy + 2), 1)
+
+    def draw_aim(self, surf):
+        """With the device: a dotted line to where a portal would land, and a ring (yes) or a red X (no)."""
+        if not RUN["device"] or self.aim is None or self.preview is None:
+            return
+        (ox, oy), (ex, ey), panel = self.preview
+        ok = panel is not None
+        color = (60, 200, 255) if ok else (230, 70, 60)
+        length = math.hypot(ex - ox, ey - oy)
+        if length > 1:
+            ux, uy = (ex - ox) / length, (ey - oy) / length
+            d = 18.0
+            while d < length - 10:
+                a = (int(ox + ux * d), int(oy + uy * d))
+                b = (int(ox + ux * min(d + 8, length)), int(oy + uy * min(d + 8, length)))
+                pygame.draw.line(surf, INK2, a, b, 4)
+                pygame.draw.line(surf, color, a, b, 2)
+                d += 16
+        end = (int(ex), int(ey))
+        if ok:
+            pygame.draw.circle(surf, INK2, end, 11, 4)
+            pygame.draw.arc(surf, BLUE, pygame.Rect(end[0] - 10, end[1] - 10, 20, 20), math.pi / 2, 3 * math.pi / 2, 3)
+            pygame.draw.arc(surf, ORANGE, pygame.Rect(end[0] - 10, end[1] - 10, 20, 20), -math.pi / 2, math.pi / 2, 3)
+        else:
+            for sx in (-1, 1):
+                pygame.draw.line(surf, INK2, (end[0] - 7, end[1] - 7 * sx), (end[0] + 7, end[1] + 7 * sx), 5)
+                pygame.draw.line(surf, color, (end[0] - 7, end[1] - 7 * sx), (end[0] + 7, end[1] + 7 * sx), 3)
+        pygame.draw.circle(surf, INK2, self.aim, 6, 1)
+        pygame.draw.circle(surf, (255, 255, 255), self.aim, 2)
+
+    def draw_arrow(self, surf):
+        """A bouncing arrow over the thing the guide wants you to do next."""
+        if not self.steps or self.step_i < 0:
+            return
+        target = self.steps[self.step_i][2]()
+        if target is None:
+            return
+        x, y = int(target[0]), int(target[1]) - 14 - int(6 * abs(math.sin(self.t * 5)))
+        y = max(44, y)
+        pts = [(x - 12, y - 18), (x + 12, y - 18), (x, y)]
+        pygame.draw.polygon(surf, GUIDE, pts)
+        pygame.draw.polygon(surf, INK2, pts, 2)
+
+    def pill(self, surf, x, y, text, color):
+        img = _font(22).render(text, True, color)
+        box = img.get_rect(topright=(x, y)).inflate(16, 8)
+        pygame.draw.rect(surf, (18, 22, 32), box, border_radius=11)
+        pygame.draw.rect(surf, color, box, 1, border_radius=11)
+        surf.blit(img, img.get_rect(center=box.center))
+        return box.left - 8
+
     def draw_hud(self, surf):
-        x, y = C.W - 12, 42
-        f = _font(24)
-        items = []
+        x, y = C.W - 10, 42
         if RUN["star"] > 0:
-            items.append((f"STAR {RUN['star']:.0f}", (255, 140, 220)))
+            x = self.pill(surf, x, y, f"STAR {RUN['star']:.0f}", (255, 140, 220))
         if RUN["helmet"]:
-            items.append(("HELMET", (240, 200, 60)))
+            x = self.pill(surf, x, y, "HELMET", (240, 200, 60))
         if RUN["boots"]:
-            items.append(("BOOTS", (90, 200, 255)))
+            x = self.pill(surf, x, y, "BOOTS", (90, 200, 255))
         if RUN["device"]:
-            items.append(("PORTALS", (230, 230, 240)))
-        items.append((f"COINS {RUN['coins']}", C.PIECE))
-        for text, color in items:
-            img = f.render(text, True, color)
-            box = img.get_rect(topright=(x, y))
-            pygame.draw.rect(surf, (0, 0, 0), box.inflate(10, 6), border_radius=4)
-            surf.blit(img, box)
-            x = box.left - 16
+            box = pygame.Rect(0, 0, 58, 25)
+            box.topright = (x, y - 4)
+            pygame.draw.rect(surf, (18, 22, 32), box, border_radius=11)
+            for k, (name, rgb) in enumerate((("blue", BLUE), ("orange", ORANGE))):
+                c = (box.left + 17 + k * 24, box.centery)
+                pygame.draw.circle(surf, rgb, c, 7, 0 if self.portals[name] else 2)
+            x = box.left - 8
+        self.pill(surf, x, y, f"COINS {RUN['coins']}", C.PIECE)
+        if self.step_img is not None:
+            surf.blit(self.step_img, (8, 40))
+            if self.step_flash > 0:
+                pygame.draw.rect(surf, (90, 230, 130), pygame.Rect((8, 40), self.step_img.get_size()), 3,
+                                 border_radius=8)
         if self.msg_t > 0:
             img = _font(26).render(self.msg, True, (255, 255, 255))
-            box = img.get_rect(center=(C.W // 2, 78))
-            pygame.draw.rect(surf, (0, 0, 0), box.inflate(16, 8), border_radius=5)
+            box = img.get_rect(center=(C.W // 2, 128))
+            pygame.draw.rect(surf, (18, 22, 32), box.inflate(18, 10), border_radius=6)
+            pygame.draw.rect(surf, self.accent, box.inflate(18, 10), 2, border_radius=6)
             surf.blit(img, box)
+        if self.card_t > 0:
+            card = _controls_card()
+            surf.blit(card, card.get_rect(center=(C.W // 2, 250)))
 
 
 class _WallTop(Platform):
@@ -1101,60 +1433,97 @@ class _WallTop(Platform):
 
 # --- the five levels, west to east -----------------------------------------------------------------
 
-class FreightHall(Level):
-    """Level 1: run, jump, coins, crates, a bot to stomp, a goo pit to clear, a spring."""
+class Orientation(Level):
+    """Level 1, the tutorial: run, jump, crates from below, stomping, then the portal device and a first portal
+    through a glass wall. Every step is spelled out in the guide."""
 
-    title = "Level 1 - Freight Hall"
-    palette = ((64, 70, 84), (72, 78, 94))
+    title = "Level 1 - Orientation (tutorial)"
+    number, name, accent, stripe_x = 1, "ORIENTATION", (255, 150, 40), 40
+    vents = ((40, 330), (560, 190))
 
     def layout(self):
-        self.decor += [Sign(300, 46, "LEVEL 1  FREIGHT HALL"), Window(560, 70, seed=12), CeilingLight(420)]
-        self.hint(90, 250, "Jump into crates from below")
-        self.hint(380, 300, "Land on bots to stomp them")
-        self.hint(640, 420, "Clear the goo, bounce on the spring")
-        self.coin_arc(100, 170, 470, 50, 4)
-        self.crate(180, 380, "coin")
-        self.crate(220, 380, "boots")
-        self.crate(260, 380, "coin")
-        self.coin_row(190, 350, 3, gap=40)
-        self.hazards.append(StompBot(400, C.FLOOR_Y, left=330, right=570))
-        self.hazards.append(Goo(590, 100))
-        self.coin_arc(570, 710, 470, 90, 5)
-        s = Spring(760)
-        self.springs.append(s)
-        self.platforms.append(s)
-        self.platforms.append(Platform(720, 210, 160))
-        self.coin_row(735, 186, 4, gap=30)
-        self.furniture += [Locker(100, C.FLOOR_Y, name="freight locker"), FilingCabinet(320, C.FLOOR_Y),
-                           Plant(840, 210)]
+        self.decor += [CeilingLight(250), CeilingLight(760), Poster(830, 300, "LAB", (255, 150, 40))]
+        self.hint(110, 250, "Crates: hit them from below")
+        self.hint(456, 160, "Shoot through glass, walk in")
+        self.crate_a = self.crate(150, 380, "coin")
+        self.crate_b = self.crate(190, 380, "boots")
+        self.coin_row(162, 346, 2, gap=40)
+        self.bot = StompBot(320, C.FLOOR_Y, left=260, right=420, speed=40)
+        self.hazards.append(self.bot)
+        if not RUN["device"]:
+            self.pedestal = DevicePedestal(452)
+        self.panel_a = FloorPanel(500, 630)
+        self.panel_b = FloorPanel(730, 870)
+        self.panels += [self.panel_a, self.panel_b]
+        self.glass = GlassWall(676, 40, 16, C.FLOOR_Y - 40)
+        self.walls.append(self.glass)
+        self.doors.append(self.glass)
+        self.coin_arc(740, 860, 470, 70, 5)
+        self.furniture += [Plant(90, C.FLOOR_Y), FilingCabinet(212, C.FLOOR_Y), Locker(634, C.FLOOR_Y)]
+
+    def guide(self):
+        p = lambda: self.player
+        return [
+            ("Run with LEFT / RIGHT (or A / D)", lambda: p().x > 110, lambda: None),
+            ("Jump with SPACE: hit a crate from below", lambda: self.crate_a.used or self.crate_b.used or p().x > 250,
+             lambda: (170, 372)),
+            ("Stomp the bot: land right on top of it", lambda: bool(self.bot.dead) or p().x > 440,
+             lambda: self.center_top(self.bot.box)),
+            (DEVICE_STEP, lambda: RUN["device"],
+             lambda: self.center_top(self.pedestal.rect) if self.pedestal else None),
+            ("LEFT-click the glowing white floor panel", lambda: self.portal_on(self.panel_a),
+             lambda: self.panel_a.rect.center),
+            ("RIGHT-click the panel past the glass", lambda: self.portal_on(self.panel_b),
+             lambda: self.panel_b.rect.center),
+            ("Walk into your portal: out the other one!", lambda: p().x > 700, lambda: self.portal_at(self.panel_a)),
+            ("That's portals. Head right to Level 2", _never, lambda: (930, 470)),
+        ]
 
 
 class InstallationLab(Level):
-    """Level 2: pick up the portal device. A floor panel and a wall panel get you up to the switch ledge."""
+    """Level 2: a floor panel and a wall panel get you up to the switch ledge that opens the door."""
 
     title = "Level 2 - Installation Lab"
-    palette = ((70, 66, 84), (80, 76, 96))
+    number, name, accent, stripe_x = 2, "INSTALLATION LAB", (220, 70, 170), 260
+    vents = ((80, 190),)
     needs_device = True
     spare_device = (190, 760)
 
     def layout(self):
-        self.decor += [Sign(300, 46, "LEVEL 2  INSTALLATION LAB"), CeilingLight(230), CeilingLight(560)]
+        self.decor += [CeilingLight(230), CeilingLight(560)]
         if not RUN["device"]:
             self.pedestal = DevicePedestal(190)
-        self.hint(90, 290, "Grab the portal device")
-        self.hint(330, 380, "Put one portal on the floor panel,")
-        self.hint(330, 400, "the other on the wall panel. Walk in.")
-        self.walls.append(Wall(840, 40, 40, 160, panels=[("left", 90, 196)]))
-        self.panels.append(FloorPanel(360, 540))
-        self.platforms.append(Platform(620, 200, 220))
-        self.buttons.append(Button(680, 200, "exit", latch=True))
-        door = Door(846, 200, 28, 300, "exit")
-        self.walls.append(door)
-        self.doors.append(door)
+        self.hint(300, 250, "Up high? Floor portal in, wall portal out")
+        self.wall = Wall(840, 40, 40, 160, panels=[("left", 90, 196)])
+        self.walls.append(self.wall)
+        self.floor_panel = FloorPanel(360, 540)
+        self.panels.append(self.floor_panel)
+        self.platforms.append(Ledge(620, 200, 220))
+        self.button = Button(680, 200, "exit", latch=True)
+        self.buttons.append(self.button)
+        self.door = Door(846, 200, 28, 300, "exit")
+        self.walls.append(self.door)
+        self.doors.append(self.door)
         self.coin_row(770, 176, 2)
         self.coin_row(390, 440, 5, gap=36)
         self.furniture += [Plinth(100, C.FLOOR_Y, colors=((200, 90, 160), (240, 240, 240))),
                            Projector(260, C.FLOOR_Y), Easel(560, C.FLOOR_Y)]
+
+    def guide(self):
+        p = lambda: self.player
+        wall_panel = self.wall.panels[0]
+        on_ledge = lambda: p().on is not None and p().rect.bottom <= 201 and p().x > 600
+        return [
+            (DEVICE_STEP, lambda: RUN["device"],
+             lambda: self.center_top(self.pedestal.rect) if self.pedestal else None),
+            ("Put a portal on the white floor panel", lambda: self.portal_on(self.floor_panel) or on_ledge(),
+             lambda: self.floor_panel.rect.center),
+            ("Put the other on the white wall panel, up high", lambda: self.portal_on(wall_panel) or on_ledge(),
+             lambda: wall_panel.rect.center),
+            ("Walk into the floor portal", on_ledge, lambda: self.portal_at(self.floor_panel)),
+            ("Step on the red button", lambda: self.button.down, lambda: self.center_top(self.button.rect)),
+            ("The door is open: drop down and go right", _never, lambda: (self.door.rect.centerx, 440)),
+        ]
 
 
 class FabricationBay(Level):
@@ -1162,56 +1531,93 @@ class FabricationBay(Level):
     and set the cube on the button by the door."""
 
     title = "Level 3 - Fabrication Bay"
-    palette = ((62, 72, 76), (70, 82, 86))
+    number, name, accent, stripe_x = 3, "FABRICATION BAY", (40, 190, 170), 330
+    vents = ((300, 190), (560, 330))
     needs_device = True
     spare_device = (100, 780)
 
     def layout(self):
-        self.decor += [Sign(340, 46, "LEVEL 3  FABRICATION BAY"), CeilingLight(520)]
+        self.decor += [CeilingLight(520)]
         self.dispensers.append(Dispenser(100))
-        self.cubes.append(Cube((100, C.FLOOR_Y)))
-        self.hint(230, 110, "F: grab the cube. Ride the lift (hold UP).")
-        self.hint(230, 130, "Fall in fast, fly out fast.")
-        self.hint(690, 300, "Cube on the button")
-        self.lifts.append(Lift(150, y_top=150, y_bottom=C.FLOOR_Y, width=64))
-        self.walls.append(Wall(100, 170, 30, 130, panels=[("right", 176, 296)]))
-        self.panels.append(FloorPanel(214, 400))
+        self.cube = Cube((100, C.FLOOR_Y))
+        self.cubes.append(self.cube)
+        self.hint(560, 300, "Fall in fast, fly out fast")
+        self.lift = Lift(150, y_top=150, y_bottom=C.FLOOR_Y, width=64)
+        self.lifts.append(self.lift)
+        self.wall = Wall(100, 170, 30, 130, panels=[("right", 176, 296)])
+        self.walls.append(self.wall)
+        self.floor_panel = FloorPanel(214, 400)
+        self.panels.append(self.floor_panel)
         self.hazards.append(Goo(420, 260))
         br = LightBridge(420, 470, 260)
         br.link = "east_bridge"
         self.bridges.append(br)
         self.coin_arc(160, 700, 300, 60, 8)
-        self.buttons.append(Button(720, C.FLOOR_Y, "exit"))
-        door = Door(846, 40, 28, C.FLOOR_Y - 40, "exit")
-        self.walls.append(door)
-        self.doors.append(door)
-        self.platforms.append(Platform(690, 400, 140))
+        self.button = Button(720, C.FLOOR_Y, "exit")
+        self.buttons.append(self.button)
+        self.door = Door(846, 40, 28, C.FLOOR_Y - 40, "exit")
+        self.walls.append(self.door)
+        self.doors.append(self.door)
+        self.platforms.append(Ledge(690, 400, 140))
         self.furniture += [FilingCabinet(670, C.FLOOR_Y), Printer3D(720, 400), Locker(800, C.FLOOR_Y)]
+
+    def guide(self):
+        p = lambda: self.player
+        wall_panel = self.wall.panels[0]
+        across = lambda: p().x > 680
+        return [
+            ("Stand by the cube and press F to pick it up", lambda: self.cube.carried or across(),
+             lambda: self.center_top(self.cube.rect)),
+            ("Stand on the yellow lift, hold UP to ride it", lambda: self.lift.rect.top <= 160 or across(),
+             lambda: self.center_top(self.lift.rect)),
+            ("Put a portal on the floor panel below", lambda: self.portal_on(self.floor_panel) or across(),
+             lambda: self.floor_panel.rect.center),
+            ("Put the other on the wall panel to your left", lambda: self.portal_on(wall_panel) or across(),
+             lambda: wall_panel.rect.center),
+            ("Step off the lift: drop into the floor portal", across, lambda: self.portal_at(self.floor_panel)),
+            ("Press F to set the cube on the button", lambda: self.button.down,
+             lambda: self.center_top(self.button.rect)),
+            ("The door is open: go right", _never, lambda: (self.door.rect.centerx, 440)),
+        ]
 
 
 class XRTracking(Level):
     """Level 4: a timed bridge over the goo, a turret that can't see over the bridge, and a star crate."""
 
     title = "Level 4 - XR Tracking Floor"
-    palette = ((58, 56, 80), (68, 64, 94))
+    number, name, accent, stripe_x = 4, "XR TRACKING FLOOR", (140, 100, 255), 200
+    vents = ((440, 190),)
 
     def layout(self):
-        self.decor += [Sign(330, 46, "LEVEL 4  XR TRACKING FLOOR"), CeilingLight(300), CeilingLight(700)]
-        self.hint(90, 300, "Crates! Then press F at the switch")
-        self.hint(330, 360, "Turrets can't see you on the bridge")
-        self.hint(640, 290, "Drop onto the turret")
-        self.crate(120, 380, "star")
-        self.crate(160, 380, "helmet")
-        self.switches.append(Switch(240, "bridge", 5))
+        self.decor += [CeilingLight(300), CeilingLight(700)]
+        self.hint(330, 330, "Turrets can't see you on the bridge")
+        self.crate_a = self.crate(120, 380, "star")
+        self.crate_b = self.crate(160, 380, "helmet")
+        self.switch = Switch(240, "bridge", 5)
+        self.switches.append(self.switch)
         self.hazards.append(Goo(300, 320))
         br = LightBridge(300, 440, 320)
         br.link = "bridge"
         self.bridges.append(br)
         self.coin_row(330, 410, 9, gap=32)
-        self.hazards.append(Turret(810, C.FLOOR_Y, facing=-1))
-        self.platforms.append(Platform(640, 360, 130))
+        self.turret = Turret(810, C.FLOOR_Y, facing=-1)
+        self.hazards.append(self.turret)
+        self.platforms.append(Ledge(640, 360, 130))
         self.coin_row(655, 336, 4, gap=32)
         self.furniture += [VRStation(100, C.FLOOR_Y), ServerRack(700, 360), ServerRack(680, C.FLOOR_Y)]
+
+    def guide(self):
+        p = lambda: self.player
+        return [
+            ("Jump into the crates: a star and a helmet", lambda: (self.crate_a.used and self.crate_b.used)
+             or p().x > 230, lambda: (160, 372)),
+            ("Press F at the switch: a bridge for 5 seconds", lambda: self.switch.left > 0 or p().x > 620,
+             lambda: self.center_top(self.switch.rect)),
+            ("Hurry across the light bridge", lambda: p().x > 620, lambda: (460, 430)),
+            ("Get on the ledge, then drop onto the turret", lambda: bool(self.turret.down) or p().x > 860,
+             lambda: self.center_top(self.turret.box)),
+            ("Onward: go right", _never, lambda: (930, 470)),
+        ]
 
 
 class XRHoloStage(Level):
@@ -1219,29 +1625,55 @@ class XRHoloStage(Level):
     in front of the headset vault, which holds the floor's code digit."""
 
     title = "Level 5 - XR Holo Stage"
-    palette = ((52, 58, 80), (62, 70, 96))
+    number, name, accent, stripe_x = 5, "XR HOLO STAGE", (40, 200, 255), 380
+    vents = ((300, 330),)
     needs_device = True
     spare_device = (440, 820)
+    guide_both_ways = True        # the digit's puzzle is the same whichever side you come in
 
     def layout(self):
-        self.decor += [Sign(330, 46, "LEVEL 5  XR HOLO STAGE"), Window(420, 90, seed=5), CeilingLight(640)]
-        self.walls.append(Wall(60, 110, 36, 110, panels=[("right", 116, 216)]))
-        self.platforms.append(Platform(96, 220, 170))
+        self.decor += [Window(420, 70, seed=5), CeilingLight(640)]
+        self.wall = Wall(60, 110, 36, 110, panels=[("right", 116, 216)])
+        self.walls.append(self.wall)
+        self.platforms.append(Ledge(96, 220, 170))
         self.dispensers.append(Dispenser(190))
-        self.cubes.append(Cube((190, 220)))
-        self.panels.append(FloorPanel(110, 260))
-        self.hint(300, 170, "The cube is up there.")
-        self.hint(300, 190, "Cube on the button turns off the lasers.")
-        self.hint(600, 120, "The field closes portals")
-        self.buttons.append(Button(470, C.FLOOR_Y, "grid"))
+        self.cube = Cube((190, 220))
+        self.cubes.append(self.cube)
+        self.floor_panel = FloorPanel(110, 260)
+        self.panels.append(self.floor_panel)
+        self.hint(590, 196, "The field closes portals")
+        self.button = Button(470, C.FLOOR_Y, "grid")
+        self.buttons.append(self.button)
         self.fizzlers.append(Fizzler(590))
-        self.platforms.append(Platform(640, 410, 120))
-        self.platforms.append(Platform(760, 320, 120))
+        self.platforms.append(Ledge(640, 410, 120))
+        self.platforms.append(Ledge(760, 320, 120))
         self.hazards.append(LaserGrid(754, 230, 410, "grid"))
         self.hazards.append(StompBot(620, C.FLOOR_Y, left=610, right=860, speed=75))
         self.coin_row(660, 386, 3)
-        self.furniture += [VRStation(300, C.FLOOR_Y), ServerRack(680, 410),
-                           Locker(810, 320, name="headset vault", holds_piece=True)]
+        self.vault = Locker(810, 320, name="headset vault", holds_piece=True)
+        self.furniture += [VRStation(300, C.FLOOR_Y), ServerRack(680, 410), self.vault]
+
+    def guide(self):
+        p = lambda: self.player
+        wall_panel = self.wall.panels[0]
+        up_top = lambda: (p().on is not None and p().rect.bottom <= 221 and p().x < 280) or self.cube.carried \
+            or self.button.down
+        return [
+            (DEVICE_STEP, lambda: RUN["device"],
+             lambda: self.center_top(self.pedestal.rect) if self.pedestal else None),
+            ("Put a portal on the floor panel under the ledge", lambda: self.portal_on(self.floor_panel) or up_top(),
+             lambda: self.floor_panel.rect.center),
+            ("Put the other on the wall panel above the ledge", lambda: self.portal_on(wall_panel) or up_top(),
+             lambda: wall_panel.rect.center),
+            ("Walk into the floor portal: up to the cube", up_top, lambda: self.portal_at(self.floor_panel)),
+            ("Press F to grab the cube, then walk off the ledge", lambda: self.cube.carried or self.button.down,
+             lambda: self.center_top(self.cube.rect)),
+            ("Press F to set the cube on the button: lasers off", lambda: self.button.down,
+             lambda: self.center_top(self.button.rect)),
+            ("Climb to the headset vault. Hold UP to search it", lambda: self.vault.searched,
+             lambda: self.center_top(self.vault.rect)),
+            ("Code digit found! The East elevator is right", _never, lambda: (930, 470)),
+        ]
 
 
-ROOMS = [FreightHall, InstallationLab, FabricationBay, XRTracking, XRHoloStage]
+ROOMS = [Orientation, InstallationLab, FabricationBay, XRTracking, XRHoloStage]
